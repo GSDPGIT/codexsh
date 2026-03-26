@@ -9,10 +9,15 @@ import fcntl
 import os
 
 # ==========================================
-# 🎯 打工人配置
+# 🎯 打工人配置 (云端安全版)
 # ==========================================
-PASSWORD = "Like3215881."
-HOST = "http://127.0.0.1:18080" # ⬅️ 已统一修改为 18080 端口
+# 🔐 核心安全升级：动态读取服务器本地密码，不再硬编码！
+PASSWORD = os.environ.get("CODEX_PASSWORD")
+if not PASSWORD:
+    print("❌ 致命错误：未读取到密码！请通过 SH 面板启动以加载本地安全变量。")
+    sys.exit(1)
+
+HOST = "http://127.0.0.1:18080"
 TG_API = "https://tg.700006.xyz/bot8223153416:AAGizqXN7b4Au4Qa5JWKT6SX-bmDe95pJeI/sendMessage?chat_id=837293210&text="
 
 PAYLOAD = {
@@ -47,7 +52,7 @@ def cleanup_journal() -> None:
     except Exception: pass
 
 def steal_cookie_and_login() -> bool:
-    print(f"🔄 [Python打工人] 正在向 {HOST} 出示密码...")
+    print(f"🔄 [Python打工人] 正在向 {HOST} 出示动态密码...")
     opener = urllib.request.build_opener(NoRedirect)
     req = urllib.request.Request(f"{HOST}/login", data=urllib.parse.urlencode({"next": "/", "password": PASSWORD}).encode("utf-8"), headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST")
     try:
