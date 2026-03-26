@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==========================================
-# 🎯 Codex Console 终极上帝监工面板 v4.0
+# 🎯 Codex Console 终极上帝监工面板 v4.1 (云端热同步版)
 # ==========================================
 
 GREEN='\033[0;32m'
@@ -16,12 +16,14 @@ VENV_PY="${WORK_DIR}/venv/bin/python"
 DAEMON_SCRIPT="/root/daemon.sh"
 UPDATE_SCRIPT="/root/codex_update.sh"
 MAX_CONSECUTIVE_FAILURES=5
-TARGET_PORT="18080"  # ⬅️ 统一管理的全局端口
+TARGET_PORT="18080"
+# 👇 你的云端脚本地址
+CLOUD_SCRIPT_URL="https://raw.githubusercontent.com/GSDPGIT/codexsh/refs/heads/main/auto_run.py"
 
 print_header() {
     clear
     echo -e "${GREEN}====================================================${NC}"
-    echo -e "${YELLOW}       Codex Console 规则级自动化管理面板 v4.0      ${NC}"
+    echo -e "${YELLOW}   Codex Console 规则级自动化管理面板 v4.1 (云端同步) ${NC}"
     echo -e "${GREEN}====================================================${NC}"
 }
 
@@ -33,6 +35,7 @@ PY_SCRIPT="$PY_SCRIPT"
 WORK_DIR="$WORK_DIR"
 VENV_PY="$VENV_PY"
 MAX_CONSECUTIVE_FAILURES=$MAX_CONSECUTIVE_FAILURES
+CLOUD_URL="$CLOUD_SCRIPT_URL"
 consecutive_failures=0
 
 wait_service_ready() {
@@ -41,7 +44,6 @@ wait_service_ready() {
     while [ \$waited -lt \$max_wait ]; do
         if systemctl is-active --quiet codex-console; then
             if command -v curl >/dev/null 2>&1; then
-                # ⬅️ 端口已变量化
                 if curl -fsS --retry 1 --max-time 3 http://127.0.0.1:${TARGET_PORT}/login >/dev/null 2>&1; then
                     return 0
                 fi
@@ -79,7 +81,16 @@ while true; do
         sleep 300; continue
     fi
 
-    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 🚀 规则 4: 唤醒 Python 打工人..." >> "\$LOG_FILE"
+    # ☁️ 新增：云端热同步逻辑
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ☁️ 规则 4: 正在从云端拉取最新打工人脚本..." >> "\$LOG_FILE"
+    if curl -sSfL -o /tmp/auto_run_temp.py "\$CLOUD_URL"; then
+        mv -f /tmp/auto_run_temp.py "\$PY_SCRIPT"
+        echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ✅ 云端脚本同步成功！" >> "\$LOG_FILE"
+    else
+        echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ 云端拉取失败，将继续使用本地旧版本运行。" >> "\$LOG_FILE"
+    fi
+
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 🚀 规则 5: 唤醒 Python 打工人..." >> "\$LOG_FILE"
     RUNNER_PY=\$(choose_python)
     \$RUNNER_PY "\$PY_SCRIPT" >> "\$LOG_FILE" 2>&1
     rc=\$?
@@ -91,7 +102,7 @@ while true; do
         if [ \$consecutive_failures -ge \$MAX_CONSECUTIVE_FAILURES ]; then exit 1; fi
     fi
 
-    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 💤 规则 5: 进入 5 分钟深度休眠..." >> "\$LOG_FILE"
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 💤 规则 6: 进入 5 分钟深度休眠..." >> "\$LOG_FILE"
     sleep 300
 done
 EOF
@@ -99,7 +110,6 @@ EOF
 }
 
 setup_auto_update() {
-    # 写入独立的更新脚本
     cat > "$UPDATE_SCRIPT" <<EOF
 #!/bin/bash
 echo "[$(date)] 开始自动更新 codex-console..." >> /root/update.log
@@ -110,7 +120,6 @@ echo "[$(date)] 更新完成并已重启服务。" >> /root/update.log
 EOF
     chmod +x "$UPDATE_SCRIPT"
 
-    # 注入到 crontab (每天凌晨 5:00 执行)
     crontab -l 2>/dev/null | grep -v "$UPDATE_SCRIPT" > /tmp/mycron
     echo "0 5 * * * $UPDATE_SCRIPT" >> /tmp/mycron
     crontab /tmp/mycron
@@ -129,7 +138,6 @@ deploy_env() {
         cd "$WORK_DIR" && git pull
     fi
 
-    # 核心：强行替换源码中的 8000 端口为 18080
     echo "🔧 正在将主程序默认端口 (8000) 统一修改为 ${TARGET_PORT}..."
     find "$WORK_DIR" -type f \( -name "*.py" -o -name "*.sh" -o -name "*.env" -o -name "*.yaml" \) -exec sed -i "s/8000/${TARGET_PORT}/g" {} + 2>/dev/null
 
@@ -138,23 +146,31 @@ deploy_env() {
     "$VENV_PY" -m pip install --upgrade pip
     "$VENV_PY" -m pip install -r requirements.txt
 
-    # 配置自动更新
     setup_auto_update
+    
+    # 自动拉取首次脚本
+    echo "☁️ 正在初始化云端打工人脚本..."
+    curl -sSfL -o "$PY_SCRIPT" "$CLOUD_SCRIPT_URL"
 
     echo -e "${GREEN}✅ 部署/更新已全部完成！(端口已绑定至 ${TARGET_PORT})${NC}"
 }
 
 start_engine() {
     echo -e "\n${YELLOW}>>> 正在启动上帝监工...${NC}"
+    # 如果没找到脚本，尝试拉取一下
     if [ ! -f "$PY_SCRIPT" ]; then
-        echo -e "${RED}❌ 致命错误：未找到打工人脚本 ($PY_SCRIPT)！请先上传！${NC}"
-        return
+        echo "☁️ 未找到本地脚本，正在从云端拉取..."
+        if ! curl -sSfL -o "$PY_SCRIPT" "$CLOUD_SCRIPT_URL"; then
+            echo -e "${RED}❌ 致命错误：从云端拉取脚本失败，请检查网络或 GitHub 链接！${NC}"
+            return
+        fi
     fi
+    
     generate_daemon
     pkill -9 -f "daemon.sh" 2>/dev/null
     touch "$BOT_LOG"
     nohup "$DAEMON_SCRIPT" > /dev/null 2>&1 &
-    echo -e "${GREEN}✅ 永动机引擎已挂载！${NC}"
+    echo -e "${GREEN}✅ 永动机引擎已挂载！将自动保持与云端脚本同步。${NC}"
 }
 
 stop_all() {
@@ -166,29 +182,21 @@ stop_all() {
     echo -e "${GREEN}✅ 所有任务和后台已彻底清理。${NC}"
 }
 
+show_status() {
+    echo -e "\n${YELLOW}>>> 服务器实时体检报告${NC}"
+    echo "------------------------------------------------"
+    uptime
+    echo "------------------------------------------------"
+    free -h | grep -E "Mem|total"
+    echo "------------------------------------------------"
+    df -h / | tail -n 1
+    echo "------------------------------------------------"
+    ps aux | grep -E "daemon.sh|auto_run.py|webui.py" | grep -v grep || echo "  (无相关进程存活)"
+    echo "------------------------------------------------"
+}
+
 main_menu() {
     while true; do
         print_header
-        echo -e "  1. 🛠️  【环境部署】 安装环境、统一端口(18080)并配置自动更新(凌晨5点)"
-        echo -e "  2. 🚀  【启动引擎】 (将严格循环: 清洗->重启->等待就绪->跑号->休眠)"
-        echo -e "  3. 🛑  【全服停机】 一键暴力清除所有相关后台、任务及进程"
-        echo -e "  4. 📊  【体检报告】 查看当前服务器负载、内存、硬盘及相关进程"
-        echo -e "  5. 👀  【实时监控】 追踪控制台输出日志 (按 Ctrl+C 返回菜单)"
-        echo -e "  0. 退出管理面板"
-        echo -e "${GREEN}====================================================${NC}"
-
-        read -p "请输入指令数字 [0-5]: " choice
-        case "$choice" in
-            1) deploy_env; read -p "按回车键返回主菜单..." ;;
-            2) start_engine; read -p "按回车键返回主菜单..." ;;
-            3) stop_all; read -p "按回车键返回主菜单..." ;;
-            4) show_status; read -p "按回车键返回主菜单..." ;;
-            5) tail -f "$BOT_LOG" ;;
-            0) exit 0 ;;
-            *) echo -e "${RED}❌ 无效指令！${NC}"; sleep 1 ;;
-        esac
-    done
-}
-
-trap '' SIGINT
-main_menu
+        echo -e "  1. 🛠️  【环境部署】 安装环境、绑定端口(18080)、初始化云端打工人"
+        echo -e "  2. 🚀  【启动
