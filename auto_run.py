@@ -165,13 +165,13 @@ def send_daily_report():
 
         total_accounts = conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
         today_tasks = conn.execute(
-            "SELECT COUNT(*) FROM registration_tasks WHERE created_at >= date('now')"
+            "SELECT COUNT(*) FROM registration_tasks WHERE created_at >= date('now','localtime')"
         ).fetchone()[0]
         today_success = conn.execute(
-            "SELECT COUNT(*) FROM registration_tasks WHERE status='completed' AND created_at >= date('now')"
+            "SELECT COUNT(*) FROM registration_tasks WHERE status='completed' AND created_at >= date('now','localtime')"
         ).fetchone()[0]
         today_failed = conn.execute(
-            "SELECT COUNT(*) FROM registration_tasks WHERE status='failed' AND created_at >= date('now')"
+            "SELECT COUNT(*) FROM registration_tasks WHERE status='failed' AND created_at >= date('now','localtime')"
         ).fetchone()[0]
         conn.close()
 
@@ -494,6 +494,11 @@ if __name__ == "__main__":
     # [升级2] 智能调度: 根据上轮表现自动调整参数
     auto_tune_payload()
 
+    # 记录本轮开始前的统计（用于计算本轮差值）
+    pre_stats = api_get("/api/registration/stats")
+    pre_success = pre_stats.get("today_success", 0) if pre_stats else 0
+    pre_failed = pre_stats.get("today_failed", 0) if pre_stats else 0
+
     # 核心改变：每轮先取消所有残留 → 再提交新任务
     cancel_all_stale_tasks()
 
@@ -503,18 +508,18 @@ if __name__ == "__main__":
 
     exit_code = monitor(batch_id)
 
-    # [升级2] 更新调度器状态
+    # [升级2] 更新调度器状态（用差值计算本轮成功率，而非累计）
     state = load_scheduler_state()
     stats = api_get("/api/registration/stats")
     if stats:
-        today_s = stats.get("today_success", 0)
-        today_f = stats.get("today_failed", 0)
-        total = today_s + today_f
-        rate = round(today_s / max(total, 1) * 100, 1)
+        round_success = stats.get("today_success", 0) - pre_success
+        round_failed = stats.get("today_failed", 0) - pre_failed
+        round_total = round_success + round_failed
+        rate = round(round_success / max(round_total, 1) * 100, 1)
         state["last_success_rate"] = rate
         state["rounds"] = state.get("rounds", 0) + 1
-        state["total_success"] = state.get("total_success", 0) + today_s
-        state["total_failed"] = state.get("total_failed", 0) + today_f
+        state["total_success"] = state.get("total_success", 0) + round_success
+        state["total_failed"] = state.get("total_failed", 0) + round_failed
         if rate < 30:
             state["fail_streak"] = state.get("fail_streak", 0) + 1
         else:
@@ -522,6 +527,6 @@ if __name__ == "__main__":
         state["last_count"] = PAYLOAD["count"]
         state["last_concurrency"] = PAYLOAD["concurrency"]
         save_scheduler_state(state)
-        print(f"📈 本轮成功率: {rate}% | 已保存调度状态")
+        print(f"📈 本轮成功率: {rate}% (成功{round_success}/失败{round_failed}) | 已保存调度状态")
 
     sys.exit(exit_code)

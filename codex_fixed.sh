@@ -399,8 +399,7 @@ SESSION_F=$STAGING/src/database/session.py
 NOTICE_TPL=$STAGING/templates/partials/site_notice.html
 [ -f "$NOTICE_TPL" ] && echo "<!-- 广告已移除 -->" > "$NOTICE_TPL"
 
-# 3. 复制数据库（保持数据完整）
-[ -f "$PROD/data/database.db" ] && cp "$PROD/data/database.db" "$STAGING/data/database.db"
+# 3. 同步配置（cp -a 已复制数据库，这里只同步可能变化的 .env）
 [ -f "$PROD/.env" ] && cp "$PROD/.env" "$STAGING/.env"
 
 # 4. 原子切换
