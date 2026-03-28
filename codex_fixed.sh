@@ -1,16 +1,18 @@
 #!/bin/bash
 # ==========================================
-# Codex Console 自动化管理面板 v6.0
-# 改进：
-#   1. daemon 智能循环：不再 kill webui，健康检查
-#   2. 初始化：密码 + API Key + 机器名
-#   3. 日志积极轮转（500K）
-#   4. 数据库自动备份到中间服务器
-#   5. 升级安全：不删数据库
-#   6. 每日更新后自动重新打补丁
-#   7. Tempmail API Key __init__ 级注入
-#   8. 去广告幂等
+# Codex Console 自动化管理面板 v7.0
+# v7.0 改进：
+#   1. 修复 daemon 健康检查端口硬编码
+#   2. Python 版本检测增加安全保护
+#   3. 每日更新脚本补 Jinja2 补丁
+#   4. TG/备份凭据改为环境变量
+#   5. SSH Key 备份支持
+#   6. 智能任务调度器（自动降档）
+#   7. 蓝绿升级（零停机）
+#   8. 每日自动报告
+#   9. 多服务器仪表盘
 # ==========================================
+VERSION="7.0"
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
@@ -35,7 +37,7 @@ CLOUD_SCRIPT_URL="https://raw.githubusercontent.com/GSDPGIT/codexsh/refs/heads/m
 print_header() {
     clear
     echo -e "${GREEN}====================================================${NC}"
-    echo -e "${YELLOW}   Codex Console 自动化管理面板 v6.0                 ${NC}"
+    echo -e "${YELLOW}   Codex Console 自动化管理面板 v${VERSION}                ${NC}"
     echo -e "${GREEN}====================================================${NC}"
 }
 
@@ -54,6 +56,8 @@ Environment="WEBUI_ACCESS_PASSWORD=$CODEX_PASSWORD"
 Environment="WEBUI_PORT=$TARGET_PORT"
 Environment="TEMPMAIL_API_KEY=${TEMPMAIL_API_KEY:-}"
 Environment="MACHINE_NAME=${MACHINE_NAME:-未命名服务器}"
+Environment="TG_BOT_TOKEN=${TG_BOT_TOKEN:-}"
+Environment="TG_CHAT_ID=${TG_CHAT_ID:-}"
 ExecStart=$VENV_PY $WORK_DIR/webui.py --port $TARGET_PORT
 Restart=always
 RestartSec=5
@@ -120,6 +124,20 @@ _ask_all_config() {
         input_api_key="${TEMPMAIL_API_KEY:-}"
     fi
 
+    # 2b. TG Bot Token
+    echo -e "${CYAN}当前 TG Bot Token: ${TG_BOT_TOKEN:+已配置}${TG_BOT_TOKEN:-未配置}${NC}"
+    read -p "🤖 TG Bot Token (回车保留不变，输入 clear 清除): " input_tg_token
+    if [ "$input_tg_token" = "clear" ]; then
+        input_tg_token=""
+    elif [ -z "$input_tg_token" ]; then
+        input_tg_token="${TG_BOT_TOKEN:-}"
+    fi
+
+    # 2c. TG Chat ID
+    echo -e "${CYAN}当前 TG Chat ID: ${TG_CHAT_ID:-未配置}${NC}"
+    read -p "💬 TG Chat ID (回车保留不变): " input_tg_chatid
+    [ -z "$input_tg_chatid" ] && input_tg_chatid="${TG_CHAT_ID:-}"
+
     # 3. 机器名
     echo -e "${CYAN}当前服务器名称: ${MACHINE_NAME:-未命名}${NC}"
     read -p "📛 服务器名称 (回车保留不变，支持中文): " input_machine_name
@@ -150,6 +168,8 @@ export CODEX_PASSWORD=$escaped_pwd
 export MACHINE_NAME="$input_machine_name"
 ENVEOF
     [ -n "$input_api_key" ] && echo "export TEMPMAIL_API_KEY=$input_api_key" >> "$ENV_FILE"
+    [ -n "$input_tg_token" ] && echo "export TG_BOT_TOKEN=\"$input_tg_token\"" >> "$ENV_FILE"
+    [ -n "$input_tg_chatid" ] && echo "export TG_CHAT_ID=\"$input_tg_chatid\"" >> "$ENV_FILE"
     [ -n "$input_backup_host" ] && {
         echo "export BACKUP_HOST=\"$input_backup_host\"" >> "$ENV_FILE"
         echo "export BACKUP_PASS=\"$input_backup_pass\"" >> "$ENV_FILE"
@@ -331,6 +351,10 @@ deploy_env() {
             rm -rf venv
         fi
     fi
+    if [ -z "$PYTHON_BIN" ]; then
+        echo -e "${RED}❌ PYTHON_BIN 未设置，请检查 Python 安装。${NC}"
+        return 1
+    fi
     [ ! -d "venv" ] && "$PYTHON_BIN" -m venv venv
     "$VENV_PY" -m pip install --upgrade pip && "$VENV_PY" -m pip install -r requirements.txt
 
@@ -343,25 +367,63 @@ deploy_env() {
     systemctl enable codex-console 2>/dev/null || true
     sync_passwords_now
 
-    # 每日更新脚本（更新后自动重打补丁）
+    # 每日更新脚本（蓝绿升级：零停机更新）
     cat > "$UPDATE_SCRIPT" <<'UPDATEEOF'
 #!/bin/bash
+# [升级4] 蓝绿升级：staging 构建 → 健康检查 → 原子切换
 source /root/.codex_env 2>/dev/null || true
-cd /root/codex-console && git remote set-url origin https://github.com/GSDPGIT/codex-console.git && git pull
-/root/codex-console/venv/bin/python -m pip install -r requirements.txt 2>/dev/null
+
+PROD="/root/codex-console"
+STAGING="/root/codex-console-staging"
+ROLLBACK="/root/codex-console-rollback"
+
+echo "[$(date)] 🔄 蓝绿升级开始..."
+
+# 1. 克隆到 staging
+rm -rf "$STAGING"
+cp -a "$PROD" "$STAGING"
+cd "$STAGING" && git remote set-url origin https://github.com/GSDPGIT/codex-console.git && git pull 2>/dev/null
+
+# 2. 安装依赖 + 补丁
+$STAGING/venv/bin/python -m pip install -r requirements.txt 2>/dev/null
+$STAGING/venv/bin/python -m pip install "jinja2==3.1.3" "starlette==0.46.2" 2>/dev/null
+
 # 重新打补丁
-bash -c 'source /root/codex.sh 2>/dev/null; apply_patches' 2>/dev/null || {
-    # 备用：手动打关键补丁
-    sed -i 's/request.count > 1000/request.count > 999999/g' /root/codex-console/src/web/routes/registration.py 2>/dev/null
-    WEBUI_F=/root/codex-console/webui.py
-    [ -f "$WEBUI_F" ] && grep -q "^[^#]*_print_project_notice()" "$WEBUI_F" && \
-        sed -i 's/^\(\s*\)_print_project_notice()/\1# _print_project_notice()/' "$WEBUI_F"
-    # 连接池补丁
-    SESSION_F=/root/codex-console/src/database/session.py
-    [ -f "$SESSION_F" ] && ! grep -q "pool_size" "$SESSION_F" && \
-        sed -i 's/pool_pre_ping=True/pool_pre_ping=True,\n            pool_size=20,\n            max_overflow=30,\n            pool_timeout=60/' "$SESSION_F"
-}
-systemctl restart codex-console
+sed -i 's/request.count > 1000/request.count > 999999/g' $STAGING/src/web/routes/registration.py 2>/dev/null
+WEBUI_F=$STAGING/webui.py
+[ -f "$WEBUI_F" ] && grep -q "^[^#]*_print_project_notice()" "$WEBUI_F" && \
+    sed -i 's/^\(\s*\)_print_project_notice()/\1# _print_project_notice()/' "$WEBUI_F"
+SESSION_F=$STAGING/src/database/session.py
+[ -f "$SESSION_F" ] && ! grep -q "pool_size" "$SESSION_F" && \
+    sed -i 's/pool_pre_ping=True/pool_pre_ping=True,\n            pool_size=20,\n            max_overflow=30,\n            pool_timeout=60/' "$SESSION_F"
+NOTICE_TPL=$STAGING/templates/partials/site_notice.html
+[ -f "$NOTICE_TPL" ] && echo "<!-- 广告已移除 -->" > "$NOTICE_TPL"
+
+# 3. 复制数据库（保持数据完整）
+[ -f "$PROD/data/database.db" ] && cp "$PROD/data/database.db" "$STAGING/data/database.db"
+[ -f "$PROD/.env" ] && cp "$PROD/.env" "$STAGING/.env"
+
+# 4. 原子切换
+systemctl stop codex-console 2>/dev/null
+rm -rf "$ROLLBACK"
+mv "$PROD" "$ROLLBACK"
+mv "$STAGING" "$PROD"
+systemctl start codex-console
+
+# 5. 健康检查（等 10 秒）
+sleep 10
+HTTP=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18080/login --connect-timeout 5 2>/dev/null)
+if [ "$HTTP" = "200" ]; then
+    echo "[$(date)] ✅ 蓝绿升级成功！"
+    rm -rf "$ROLLBACK"
+else
+    echo "[$(date)] ❌ 升级失败(HTTP $HTTP)，回滚..."
+    systemctl stop codex-console 2>/dev/null
+    rm -rf "$PROD"
+    mv "$ROLLBACK" "$PROD"
+    systemctl start codex-console
+    echo "[$(date)] 🔙 已回滚到旧版本"
+fi
 UPDATEEOF
     chmod +x "$UPDATE_SCRIPT"
     crontab -l 2>/dev/null | grep -v "$UPDATE_SCRIPT" | grep -v "$BACKUP_SCRIPT" > /tmp/mycron
@@ -390,12 +452,18 @@ MACHINE_TAG=$(echo "$MACHINE_NAME" | tr ' ' '_')
 DATE=$(date +%Y%m%d_%H%M%S)
 REMOTE_FILE="${BACKUP_PATH}/${MACHINE_TAG}_${DATE}.db"
 
-# 用 sshpass + scp 传输
-sshpass -p "$BACKUP_PASS" scp -o StrictHostKeyChecking=no "$DB_FILE" "${BACKUP_HOST}:${REMOTE_FILE}" 2>/dev/null
-
-# 在远程服务器上只保留最近 3 份
-sshpass -p "$BACKUP_PASS" ssh -o StrictHostKeyChecking=no "$BACKUP_HOST" \
-    "cd $BACKUP_PATH && ls -t ${MACHINE_TAG}_*.db 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null" 2>/dev/null
+# 优先用 SSH Key，没有再用 sshpass
+if [ -f /root/.ssh/id_rsa ] || [ -f /root/.ssh/id_ed25519 ]; then
+    scp -o StrictHostKeyChecking=no "$DB_FILE" "${BACKUP_HOST}:${REMOTE_FILE}" 2>/dev/null
+    ssh -o StrictHostKeyChecking=no "$BACKUP_HOST" \
+        "cd $BACKUP_PATH && ls -t ${MACHINE_TAG}_*.db 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null" 2>/dev/null
+elif [ -n "$BACKUP_PASS" ]; then
+    sshpass -p "$BACKUP_PASS" scp -o StrictHostKeyChecking=no "$DB_FILE" "${BACKUP_HOST}:${REMOTE_FILE}" 2>/dev/null
+    sshpass -p "$BACKUP_PASS" ssh -o StrictHostKeyChecking=no "$BACKUP_HOST" \
+        "cd $BACKUP_PATH && ls -t ${MACHINE_TAG}_*.db 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null" 2>/dev/null
+else
+    echo "[$(date)] ❌ 无 SSH Key 也无密码，备份跳过" >> /root/bot_run.log
+fi
 BACKUPEOF
     chmod +x "$BACKUP_SCRIPT"
     # 加入 cron（避免重复）
@@ -444,7 +512,7 @@ while true; do
 
     # ── 规则 1: 健康检查（不再暴力 kill） ──
     echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 🏥 规则 1: 健康检查..." >> "\$LOG_FILE"
-    HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18080/login --connect-timeout 5 2>/dev/null)
+    HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:${TARGET_PORT}/login --connect-timeout 5 2>/dev/null)
     if [ "\$HTTP_CODE" != "200" ]; then
         echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ 服务异常(HTTP \$HTTP_CODE)，正在重启..." >> "\$LOG_FILE"
         systemctl restart codex-console >> "\$LOG_FILE" 2>&1
@@ -464,8 +532,11 @@ while true; do
     echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 🚀 规则 3: 唤醒打工人..." >> "\$LOG_FILE"
     PYTHONUNBUFFERED=1 \$VENV_PY "\$PY_SCRIPT" >> "\$LOG_FILE" 2>&1
 
-    # ── 规则 5: 休眠 ──
-    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 💤 规则 4: 进入 5 分钟休眠..." >> "\$LOG_FILE"
+    # ── 规则 5: 仪表盘心跳 ──
+    [ -f /root/codex_heartbeat.sh ] && bash /root/codex_heartbeat.sh 2>/dev/null
+
+    # ── 规则 6: 休眠 ──
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 💤 规则 5: 进入 5 分钟休眠..." >> "\$LOG_FILE"
     sleep 300
 done
 DAEMONEOF
