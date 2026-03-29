@@ -632,6 +632,82 @@ conn.close()
     fi
 }
 
+# ═══════════ 安装群控主控面板 ═══════════
+install_dashboard() {
+    echo -e "\n${CYAN}🖥️  安装群控主控面板...${NC}"
+    local DASH_SCRIPT="/root/codex_dashboard.py"
+    local DASH_URL="https://raw.githubusercontent.com/GSDPGIT/codexsh/main/codex_dashboard.py"
+
+    curl -sSfL -o "$DASH_SCRIPT" "$DASH_URL" 2>/dev/null
+    if [ ! -f "$DASH_SCRIPT" ]; then
+        echo -e "${RED}❌ 下载失败，请检查网络。${NC}"
+        return 1
+    fi
+    chmod +x "$DASH_SCRIPT"
+
+    # 创建 systemd 服务
+    local DASH_PORT="${DASHBOARD_PORT:-8888}"
+    cat <<DASHEOF > /etc/systemd/system/codex-dashboard.service
+[Unit]
+Description=Codex Dashboard
+After=network.target
+
+[Service]
+User=root
+ExecStart=/usr/bin/python3 /root/codex_dashboard.py --port $DASH_PORT
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+DASHEOF
+    systemctl daemon-reload
+    systemctl enable codex-dashboard 2>/dev/null || true
+    systemctl restart codex-dashboard
+    echo -e "${GREEN}✅ 群控主控面板已安装并启动！${NC}"
+    echo -e "${CYAN}   访问地址: http://本机IP:$DASH_PORT${NC}"
+    echo -e "${CYAN}   子服务器配置: 在 .codex_env 中添加${NC}"
+    echo -e "${YELLOW}   export DASHBOARD_URL=\"http://本机IP:$DASH_PORT\"${NC}"
+}
+
+# ═══════════ 查看当前配置 ═══════════
+show_config() {
+    source "$ENV_FILE" 2>/dev/null || true
+    echo -e "\n${CYAN}╔══════════════ 当前配置 (.codex_env) ══════════════╗${NC}"
+    echo -e "  🔑 密码:        ${CODEX_PASSWORD:-${RED}未设置${NC}}"
+    echo -e "  📛 机器名:      ${MACHINE_NAME:-未命名服务器}"
+    echo -e "  🔐 Tempmail Key: ${TEMPMAIL_API_KEY:+已配置}${TEMPMAIL_API_KEY:-未配置}"
+    echo -e "  🤖 TG Token:    ${TG_BOT_TOKEN:+已配置}${TG_BOT_TOKEN:-未配置}"
+    echo -e "  💬 TG Chat ID:  ${TG_CHAT_ID:-未配置}"
+    echo -e "  🖥️  备份服务器:  ${BACKUP_HOST:-未配置}"
+    echo -e "  📂 备份路径:    ${BACKUP_PATH:-未配置}"
+    echo -e "  🌐 主控面板:    ${DASHBOARD_URL:-未配置}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════╝${NC}"
+}
+
+# ═══════════ 配置中心子菜单 ═══════════
+config_center() {
+    while true; do
+        print_header
+        echo -e "  ${YELLOW}⚙️  配置中心${NC}\n"
+        echo -e "  1. 📋  【查看配置】 查看当前所有配置项"
+        echo -e "  2. ✏️   【修改配置】 修改密码/TG/API Key/机器名/备份"
+        echo -e "  3. 🖥️   【安装主控】 安装群控主控面板（本机做主控）"
+        echo -e "  4. 💾  【立即备份】 备份数据库到中间服务器"
+        echo -e "  0. ↩️   返回主菜单"
+        echo -e "${GREEN}====================================================${NC}"
+
+        read -p "请选择 [0-4]: " cfg_choice
+        case "$cfg_choice" in
+            1) show_config; read -p "按回车继续..." ;;
+            2) _ask_all_config "edit"; apply_patches; read -p "按回车继续..." ;;
+            3) install_dashboard; read -p "按回车继续..." ;;
+            4) backup_now; read -p "按回车继续..." ;;
+            0) return ;;
+        esac
+    done
+}
+
 # ═══════════ 主菜单 ═══════════
 main_menu() {
     while true; do
@@ -644,14 +720,13 @@ main_menu() {
         echo -e "  3. 🛑  【彻底停机】 暴力停止所有后台任务"
         echo -e "  4. 📊  【体检报告】 查看 CPU、内存及进程状态"
         echo -e "  5. 👀  【实时监控】 实时查看运行日志（Ctrl+C 退出）"
-        echo -e "  6. ⚙️   【修改配置】 逐项修改密码/API Key/机器名/备份（回车保留不变）"
+        echo -e "  6. ⚙️   【配置中心】 查看/修改配置、安装主控面板、备份"
         echo -e "  7. 🚫  【去除广告】 去除项目声明广告"
         echo -e "  8. 🧹  【清理任务】 删除历史完成/失败任务记录"
-        echo -e "  9. 💾  【立即备份】 立即备份数据库到中间服务器"
         echo -e "  0. 退出管理面板"
         echo -e "${GREEN}====================================================${NC}"
 
-        read -p "请输入指令数字 [0-9]: " choice
+        read -p "请输入指令数字 [0-8]: " choice
         case "$choice" in
             1) deploy_env; read -p "按回车继续..." ;;
             2) start_engine; read -p "按回车继续..." ;;
@@ -666,10 +741,9 @@ main_menu() {
                 journalctl -u codex-console -f -n 30 --no-pager 2>/dev/null || tail -f "$BOT_LOG"
                 trap '' SIGINT
                 ;;
-            6) _ask_all_config "edit"; apply_patches; read -p "按回车继续..." ;;
+            6) config_center ;;
             7) remove_ads; read -p "按回车继续..." ;;
             8) clear_old_tasks; read -p "按回车继续..." ;;
-            9) backup_now; read -p "按回车继续..." ;;
             0) exit 0 ;;
         esac
     done
@@ -677,3 +751,4 @@ main_menu() {
 
 trap '' SIGINT
 main_menu
+
